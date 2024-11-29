@@ -13,9 +13,132 @@ import traceback
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from thehive4py.api import TheHiveApi
-from thehive4py.models import Alert, AlertArtifact, CustomFieldHelper
+from thehive4py import TheHiveApi
+from thehive4py.types.alert import InputAlert
+from thehive4py.errors import TheHiveError
 
+
+# Function to create TheHive InputAlert
+def create_alert_object(data):
+    # Map severity names to numerical values
+    severity_mapping = {
+        'Informational': 1,
+        'Low': 1,
+        'Medium': 2,
+        'High': 3,
+        'Critical': 4
+    }
+
+    # Extract fields
+    eventType = data.get('type', 'Unknown')
+    source = 'CrowdStrike'
+    sourceRef = data.get('id', '')
+    detection_name = data.get('display_name', 'No Title')
+    severity_name = data.get('severity_name', 'Informational').capitalize()
+    adjustedSeverity = severity_mapping.get(severity_name, 1)
+    falcon_link = data.get('falcon_host_link', "")
+    description = data.get('description', "")
+    eventTimestamp = data.get('timestamp', None)
+    observables = []
+    tags = ['CrowdStrike']
+    mitreTags = []
+    
+    device_info = data.get('device', {})
+    hostname = device_info.get('hostname', 'Unknown Host')
+
+    # Extract observables
+    # Check for MD5
+    if 'md5' in data and data['md5'] and data['md5'] != 'N/A':
+        observables.append({'dataType': 'hash', 'data': data['md5'], 'tags': ["md5"]})
+    # Check for SHA256
+    if 'sha256' in data and data['sha256'] and data['sha256'] != 'N/A':
+        observables.append({'dataType': 'hash', 'data': data['sha256'], 'tags': ["sha256"]})
+    #if 'sha1' in data and data['sha1'] and data['sha1'] != 'N/A':
+    #    observables.append({'dataType': 'hash', 'data': data['sha1'], 'tags': ["sha1"]})
+    # Filename
+    if 'filename' in data and data['filename']:
+        filename_observable = {'dataType': 'filename', 'data': data['filename']}
+        if 'filepath' in data and data['filepath']:
+            filename_observable["tags"] = [data['filepath']]
+        observables.append(filename_observable)
+    # Filepath
+    if 'filepath' in data and data['filepath']:
+        observables.append({'dataType': 'other', 'data': data['filepath'], 'tags': ["filepath"]})
+    # Command line
+    if 'cmdline' in data and data['cmdline']:
+        observables.append({'dataType': 'other', 'data': data['cmdline'], 'tags': ["cmdline"]})
+    # IP addresses
+    if 'external_ip' in device_info and device_info['external_ip']:
+        observables.append({'dataType': 'ip', 'data': device_info['external_ip'], 'tags': ["external-ip"]})
+    if 'local_ip' in device_info and device_info['local_ip']:
+        observables.append({'dataType': 'ip', 'data': device_info['local_ip'], 'tags': ["local-ip"]})
+    # Hostname
+    if 'hostname' in device_info and device_info['hostname']:
+        hostname_observable = {'dataType': 'hostname', 'data': device_info['hostname']}
+        hostname_tags = []
+        if 'user_name' in data and data['user_name']:
+            hostname_tags.append(f"username:{data['user_name']}")
+        if "machine_domain" in device_info and device_info["machine_domain"]:
+            hostname_tags.append(f"machine_domain:{device_info['machine_domain']}")
+        if hostname_tags:
+            hostname_observable["tags"] = hostname_tags
+        observables.append(hostname_observable)
+
+    # FQDN
+    if "machine_domain" in device_info and device_info["machine_domain"] and "hostname" in device_info and device_info["hostname"]:
+        fqdn = f"{device_info['hostname']}.{device_info['machine_domain']}"
+        observables.append({'dataType': 'fqdn', 'data': fqdn, 'tags': ["machine-domain"]})
+
+
+    # Extract MITRE ATT&CK techniques
+    if 'technique_id' in data and data['technique_id'] and not data['technique_id'].startswith('CS'):
+        mitreTags.append(data['technique_id'])
+    tags.extend(mitreTags)
+    technique = data.get('technique', '').strip()
+    if not technique:
+        technique = 'Unknown Technique'
+
+    # Procedures
+    procedures = []
+    for tag in mitreTags:
+        procedure = {
+            'patternId': tag,
+            'occurDate': eventTimestamp,
+        }
+        procedures.append(procedure)
+        
+
+        
+    # Title
+    title = f"[{severity_name}] Detection on {hostname}: {technique} - {detection_name}"
+
+    
+    # Description update
+    if description:
+        description += "\n\n"
+    else:
+        description = ""
+
+    description += f"[Link to CrowdStrike Alert]({falcon_link})\n\n"
+
+    # Add the entire data in a code block formatted as JSON
+    description += f"```json\n{json.dumps(data, indent=4)}\n```"
+
+    # Alert constrution
+    input_alert: InputAlert = {
+        "type": eventType,
+        "source": source,
+        "sourceRef": sourceRef,
+        "title": title,
+        "severity": adjustedSeverity,
+        "description": description,
+        "date": eventTimestamp,
+        'observables': observables if observables else [],
+        'tags': tags,
+        'procedures': procedures if procedures else []
+    }
+
+    return input_alert
 
 # set offset high to only get new events.
 offset = 999999999
@@ -29,14 +152,16 @@ appId = "falcon2thehive"
 THEHIVE_URL = 'http://127.0.0.1:9000'
 THEHIVE_API_KEY = 'XXXXXXXXXXXXXXX'
 
-api = TheHiveApi(THEHIVE_URL, THEHIVE_API_KEY)
-#refreshURL = "https://firehose.crowdstrike.com:443/sensors/entities/datafeed-actions/v1/0"
+## INIT - TH & CRWD
+
+hive = TheHiveApi(
+        url=THEHIVE_URL,
+        apikey=THEHIVE_API_KEY,
+    )
 
 falcon = EventStreams(client_id=g_client_id, \
                       client_secret=g_client_secret
                       )
-
-
 
 response = falcon.list_available_streams(app_id=appId, format="flatjson")
 dump = json.dumps(response, sort_keys=True, indent=4)
@@ -156,94 +281,19 @@ try:
                 if (isDetectionSummaryEvent == "DetectionSummaryEvent"):
                     detection_summary_event = decoded_line
 
-                    # From there, we are ready to retreive Detection values in order to send them to The Hive
-                    artifacts = []
-
-                    ProcessStartTime = detection_summary_event.get('event.ProcessStartTime')
-                    ProcessEndTime = detection_summary_event.get('event.ProcessEndTime')
-                    ProcessId = detection_summary_event.get('eventProcessId')
-                    ParentProcessId = detection_summary_event.get('event.ParentProcessId')
-                    
-                    ComputerName = detection_summary_event.get('event.ComputerName')
-                    artifacts.append(AlertArtifact(dataType='hostname', data=ComputerName))
-
-                    UserName = detection_summary_event.get('event.UserName')
-                    artifacts.append(AlertArtifact(dataType='other', data="UserName = " + UserName))
-
-                    FalconHostLink = detection_summary_event.get('event.FalconHostLink')
-                    artifacts.append(AlertArtifact(dataType='other', data="Detection URL in CrowdStrike : " + FalconHostLink))
-
-                    DetectName = detection_summary_event.get('event.DetectName')
-                    
-                    DetectDescription = detection_summary_event.get('event.DetectDescription')
-
-                    Severity = detection_summary_event.get('event.Severity')
-                    SeverityName = detection_summary_event.get('event.SeverityName')
-                    artifacts.append(AlertArtifact(dataType='other', data="Detection Severity" + SeverityName))
-
-                    FileName = detection_summary_event.get('event.FileName')
-                    artifacts.append(AlertArtifact(dataType='filename', data=FileName))
-
-                    FilePath = detection_summary_event.get('event.FilePath')
-                    artifacts.append(AlertArtifact(dataType='other', data="FilePath : " + FilePath))
-
-                    CommandLine = detection_summary_event.get('event.CommandLine')
-                    artifacts.append(AlertArtifact(dataType='other', data="CommandLine : " + CommandLine))
-
-                    SHA256String = detection_summary_event.get('event.SHA256String')
-                    artifacts.append(AlertArtifact(dataType='hash', data=SHA256String))
-
-                    MD5String = detection_summary_event.get('event.MD5String')
-                    artifacts.append(AlertArtifact(dataType='hash', data=MD5String))
-
-                    SHA1String = detection_summary_event.get('event.SHA1String')
-                    artifacts.append(AlertArtifact(dataType='hash', data=SHA1String))
-
-                    MachineDomain = detection_summary_event.get('event.MachineDomain')
-                    artifacts.append(AlertArtifact(dataType='fqdn', data=MachineDomain))
-
-                    SensorId = detection_summary_event.get('event.SensorId')
-                    artifacts.append(AlertArtifact(dataType='other', data="Sensor ID : " + SensorId))
-
-                    DetectId = detection_summary_event.get('event.DetectId')
-
-
-
-
-
-                    #########################################
-                    # BELOW WE PREPARE MESSAGE FOR THE HIVE
-                    #########################################
-                    # Prepare custom fields
-                    customFields = CustomFieldHelper()\
-                        .add_string('falcon-detection-url', FalconHostLink)\
-                        .build()
-
-                    # Prepare the sample Alert
-                    sourceRef = DetectId
-                    alert = Alert(title=DetectName,
-                        tlp=3,
-                        tags=['CrowdStrike', 'CS', 'Detection'],
-                        description = DetectDescription,
-                        type='external',
-                        source='CSFalcon',
-                        sourceRef=sourceRef,
-                        severity=((Severity-1)), # Here we map CS Severity with TheHive's 
-                        artifacts=artifacts,
-                        customFields=customFields
-                        )
-
-
-
                     # Create the alert
                     try:
-                        response = api.create_alert(alert)
-    
-                        # DEBUG ONLY - Print the JSON response 
-                        print(json.dumps(response.json(), indent=4, sort_keys=True))
-
-                    except AlertException as e:
-                        print("Alert create error: {}".format(e))
+                        if 'event' in detection_summary_event:
+                            new_alert = hive.alert.create(alert=create_alert_object(detection_summary_event["event"]))
+                        else:
+                            new_alert = hive.alert.create(alert=create_alert_object(detection_summary_event))
+                    except TheHiveError as e:
+                        print(f"An error occurred: {e.message}")
+                        if e.response:
+                            print(f"Response status code: {e.response.status_code}")
+                            print(f"Response content: {e.response.text}")
+                    except Exception as e:
+                        print(f"An unexpected error occurred: {e}")
 
 
             # Refreshing stream 
