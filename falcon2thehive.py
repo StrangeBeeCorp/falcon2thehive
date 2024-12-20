@@ -151,12 +151,14 @@ g_client_secret = 'YYYYYYYYYY'
 appId = "falcon2thehive"
 THEHIVE_URL = 'http://127.0.0.1:9000'
 THEHIVE_API_KEY = 'XXXXXXXXXXXXXXX'
+THEHIVE_ORG = None
 
 ## INIT - TH & CRWD
 
 hive = TheHiveApi(
         url=THEHIVE_URL,
         apikey=THEHIVE_API_KEY,
+        organisation=THEHIVE_ORG
     )
 
 falcon = EventStreams(client_id=g_client_id, \
