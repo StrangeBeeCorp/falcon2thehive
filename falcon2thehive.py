@@ -161,9 +161,17 @@ hive = TheHiveApi(
         organisation=THEHIVE_ORG
     )
 
-falcon = EventStreams(client_id=g_client_id, \
-                      client_secret=g_client_secret
-                      )
+# Define the custom header
+extra_headers = {
+    "User-Agent": "strangebee-thehive/1.0"
+}
+
+# Initialize the EventStreams service class with custom headers
+falcon = EventStreams(
+    client_id=g_client_id,
+    client_secret=g_client_secret,
+    ext_headers=extra_headers
+)
 
 response = falcon.list_available_streams(app_id=appId, format="flatjson")
 dump = json.dumps(response, sort_keys=True, indent=4)
@@ -213,9 +221,17 @@ def refresh_stream():
 
 '''
 def refresh_stream():
-    falcon = EventStreams(client_id=g_client_id,
-            client_secret=g_client_secret
-            )
+    # Define the custom header
+    extra_headers = {
+        "User-Agent": "strangebee-thehive/1.0"
+    }
+    
+    # Initialize the EventStreams service class with custom headers
+    falcon = EventStreams(
+        client_id=g_client_id,
+        client_secret=g_client_secret,
+        ext_headers=extra_headers
+    )
 
     PARTITION = 0   #Refresh the partition we are working with
 
