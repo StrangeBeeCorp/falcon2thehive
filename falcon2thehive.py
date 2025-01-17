@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from falconpy import EventStreams
+from falconpy import OAuth2
 import json
 import time
 import datetime
@@ -145,9 +146,9 @@ offset = 999999999
 #offset = 1
 
 # ###################### TO BE CUSTOMIZED ##################
-g_token_url = "https://api.crowdstrike.com/oauth2/token"
-g_client_id = 'XXXXXXXXXXXXXX'
-g_client_secret = 'YYYYYYYYYY'
+CRWD_BASE_URL = "https://api.crowdstrike.com" # Also supports short region names : US-1, US-2, EU-1, US-GOV-1
+CRWD_CLIENT_ID = 'XXXXXXXXXXXXXX'
+CRWD_CLIENT_SECRET = 'YYYYYYYYYY'
 appId = "falcon2thehive"
 THEHIVE_URL = 'http://127.0.0.1:9000'
 THEHIVE_API_KEY = 'XXXXXXXXXXXXXXX'
@@ -167,9 +168,9 @@ extra_headers = {
 }
 
 # Initialize the EventStreams service class with custom headers
+auth = OAuth2(client_id=CRWD_CLIENT_ID, client_secret=CRWD_CLIENT_SECRET, base_url=CRWD_BASE_URL)
 falcon = EventStreams(
-    client_id=g_client_id,
-    client_secret=g_client_secret,
+    auth_object=auth,
     ext_headers=extra_headers
 )
 
@@ -227,9 +228,9 @@ def refresh_stream():
     }
     
     # Initialize the EventStreams service class with custom headers
+    auth = OAuth2(client_id=CRWD_CLIENT_ID, client_secret=CRWD_CLIENT_SECRET, base_url=CRWD_BASE_URL)
     falcon = EventStreams(
-        client_id=g_client_id,
-        client_secret=g_client_secret,
+        auth_object=auth,
         ext_headers=extra_headers
     )
 
@@ -337,18 +338,3 @@ except Exception as e:
 
 
 sys.exit(0)
-
-
-
-
-
-
-                    
-                    
-                    
-                    
-                    
-                    
-                                  
-
-
