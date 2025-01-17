@@ -27,8 +27,9 @@ Alerts are generated in TheHive and support the extraction of observables and TT
 ## Configuration :
 Edit the `falcon2thehive` script and adapt the following lines with your own values :
 ```
-g_client_id = 'XXXXXXXXXXXXXX'    # Your Falcon API's Client ID
-g_client_secret = 'YYYYYYYYYY'    # Your Falcon API's Secret        
+CRWD_BASE_URL = 'https://api.crowdstrike.com'  # Also supports short values like : US-1, US-2, EU-1, US-GOV-1
+CRWD_CLIENT_ID = 'XXXXXXXXXXXXXX'    # Your Falcon API's Client ID
+CRWD_CLIENT_SECRET = 'YYYYYYYYYY'    # Your Falcon API's Secret        
 THEHIVE_URL = 'http://127.0.0.1:9000'   # URL of your TheHive instance
 THEHIVE_API_KEY = 'XXXXXXXXXXXXXXX'     # Your Hive API Key
 THEHIVE_ORG = None # Optional - define a specific ORG if your user is in multiple organization
