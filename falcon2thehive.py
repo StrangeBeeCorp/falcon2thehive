@@ -145,14 +145,15 @@ def create_alert_object(data):
 offset = 999999999
 #offset = 1
 
-# ###################### TO BE CUSTOMIZED ##################
-CRWD_BASE_URL = "https://api.crowdstrike.com" # Also supports short region names : US-1, US-2, EU-1, US-GOV-1
-CRWD_CLIENT_ID = 'XXXXXXXXXXXXXX'
-CRWD_CLIENT_SECRET = 'YYYYYYYYYY'
-appId = "falcon2thehive"
-THEHIVE_URL = 'http://127.0.0.1:9000'
-THEHIVE_API_KEY = 'XXXXXXXXXXXXXXX'
-THEHIVE_ORG = None
+CRWD_BASE_URL = os.environ.get("CRWD_BASE_URL", "https://api.crowdstrike.com") # Also supports short region names : US-1, US-2, EU-1, US-GOV-1
+CRWD_CLIENT_ID = os.environ.get("CRWD_CLIENT_ID")
+CRWD_CLIENT_SECRET = os.environ.get("CRWD_CLIENT_SECRET")
+THEHIVE_URL = os.environ.get("THEHIVE_URL", "http://127.0.0.1:9000")
+THEHIVE_API_KEY = os.environ.get("THEHIVE_API_KEY")
+THEHIVE_ORG = os.environ.get("THEHIVE_ORG", None)
+appId = os.environ.get("APP_ID", "falcon2thehive")
+
+
 
 ## INIT - TH & CRWD
 
