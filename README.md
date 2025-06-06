@@ -14,15 +14,22 @@ Alerts are generated in TheHive and support the extraction of observables and TT
 ## Installation
 1. **Clone the Repository**
 
-```git clone https://github.com/StrangeBeeCorp/falcon2thehive.git```
+```bash
+git clone https://github.com/StrangeBeeCorp/falcon2thehive.git
+cd falcon2thehive
+```
 
-2. **Navigate to the Project Directory**
+2. **Create and Activate a Virtual Environment (Recommended)**
 
-```cd falcon2thehive```
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
 
 3. Install Dependencies
 
 ```pip install -r requirements.txt```
+
 
 ## Configuration:
 The script uses environment variables for configuration. Update or set the following environment variables as needed:
@@ -49,7 +56,7 @@ export THEHIVE_ORG="MYORGNAME"
 
 ## Usage:
 To run the script on background :
-`falcon2thehive.py &`
+`python falcon2thehive.py &`
 
 ## Screenshots:
 ### Alert creation
