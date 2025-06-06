@@ -153,7 +153,12 @@ THEHIVE_API_KEY = os.environ.get("THEHIVE_API_KEY")
 THEHIVE_ORG = os.environ.get("THEHIVE_ORG", None)
 appId = os.environ.get("APP_ID", "falcon2thehive")
 
-
+if not CRWD_CLIENT_ID or not CRWD_CLIENT_SECRET:
+    print("ERROR: CRWD_CLIENT_ID or CRWD_CLIENT_SECRET environment variable not set.")
+    sys.exit(1)
+if not THEHIVE_API_KEY:
+    print("ERROR: THEHIVE_API_KEY environment variable not set.")
+    sys.exit(1)
 
 ## INIT - TH & CRWD
 
