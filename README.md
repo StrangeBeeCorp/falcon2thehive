@@ -7,8 +7,8 @@ Alerts are generated in TheHive and support the extraction of observables and TT
 
 ---
 **Install via:**  
-- 🐳 [**Docker Deployment**](#docker-deployment) (recommended for most users)  
-- ⚙️ [**Manual Python Installation**](#manual-python-installation)
+- 🐳 [**Docker Deployment**](#-docker-deployment) (recommended for most users)  
+- ⚙️ [**Manual Python Installation**](#%EF%B8%8F-manual-python-installation)
 ---
 
 ## 📸 Screenshots
