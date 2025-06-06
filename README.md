@@ -5,6 +5,12 @@ This connector is a *work in progress* and is being developed to be compatible w
 
 Alerts are generated in TheHive and support the extraction of observables and TTPs, as well as defining a format for the title, description, and tags.
 
+---
+**Install via:**  
+- 🐳 [**Docker Deployment**](#docker-deployment) (recommended for most users)  
+- ⚙️ [**Manual Python Installation**](#manual-python-installation)
+---
+
 ## 📸 Screenshots
 ### Alert creation
 ![alert example](<./assets/alert-example.png>)
@@ -15,7 +21,7 @@ Alerts are generated in TheHive and support the extraction of observables and TT
 ![observables](<./assets/alert-observables-details.png>)
 
 ## Installation
-### 🐳 Docker Deployment (recommended)
+### 🐳 Docker Deployment
 Running `falcon2thehive` in Docker is a convenient way to keep your environment consistent and simplify deployment.
 
 > **Step 0**: Install Docker if you don’t have it. [Get Docker](https://docs.docker.com/get-docker/)
