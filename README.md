@@ -58,6 +58,82 @@ export THEHIVE_ORG="MYORGNAME"
 To run the script on background :
 `python falcon2thehive.py &`
 
+## 🐳 Docker Deployment
+Running `falcon2thehive` in Docker is a convenient way to keep your environment consistent and simplify deployment.
+
+### 0. Install Docker
+
+If you don’t already have Docker installed, download it here:
+https://docs.docker.com/get-docker/
+
+### 1. Build the Docker Image
+```bash
+docker build -t falcon2thehive .
+```
+
+### 2. Set up your .env accordingly
+Make sure to have a well configured `.env`file in your directory.
+```
+CRWD_BASE_URL=https://api.crowdstrike.com
+CRWD_CLIENT_ID=your_client_id
+CRWD_CLIENT_SECRET=your_client_secret
+THEHIVE_URL=http://my-thehive-url.com
+THEHIVE_API_KEY=your_thehive_api_key
+# Optionally
+THEHIVE_ORG=MYORGNAME
+APP_ID=falcon2thehive
+```
+### 3. Run the Container
+Run:
+```bash
+docker run -d \
+  --restart unless-stopped \
+  --env-file .env \
+  --name f2h falcon2thehive
+```
+
+**To view logs for the running connector:**
+
+```bash
+docker logs -f f2h
+```
+
+### Alternative: Passing environment variables via `-e` flags 
+You can also set environment variables directly in the `docker run` command (for quick testing):
+
+```bash
+docker run -d \
+  --restart unless-stopped \
+  -e CRWD_BASE_URL="https://api.crowdstrike.com" \
+  -e CRWD_CLIENT_ID="your_client_id" \
+  -e CRWD_CLIENT_SECRET="your_client_secret" \
+  -e THEHIVE_URL="http://my-thehive-url.com" \
+  -e THEHIVE_API_KEY="your_thehive_api_key" \
+  --name f2h falcon2thehive
+```
+
+### Stopping, Restarting, and Updating Environment Variables
+
+To stop the connector:
+```bash
+docker stop f2h
+```
+To start it again (with the same env vars):
+```bash
+docker start f2h
+```
+To change environment variables:
+1. Stop and remove the existing container:
+```bash
+docker stop f2h
+docker rm f2h
+```
+2. Start a new one with updated -e flags or an updated .env file:
+
+```bash
+docker run -d --restart unless-stopped --env-file .env --name f2h falcon2thehive
+```
+
 ## Screenshots:
 ### Alert creation
 ![alert example](<./assets/alert-example.png>)
