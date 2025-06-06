@@ -184,7 +184,25 @@ dump = json.dumps(response, sort_keys=True, indent=4)
 response2use = str(response).replace("\'", "\"")
 load = json.loads(response2use)
 
-for i in load["body"]["resources"]:
+resources = load.get("body", {}).get("resources")
+if not resources:
+    errors = load.get("body", {}).get("errors")
+    if errors:
+        print("\nCrowdStrike API Error:")
+        for err in errors:
+            print(f" - Code: {err.get('code')}, Message: {err.get('message')}")
+        print("\nTroubleshooting tips:")
+        print("- Check your CRWD_CLIENT_ID and CRWD_CLIENT_SECRET are correct and valid.")
+        print("- Check your CRWD_BASE_URL matches your Falcon console region (US-1, EU-1, etc).")
+        print("- Make sure your API client has the necessary permissions (at least Event streams: Read).")
+        print("- If you just created credentials, wait a few minutes and retry.")
+        sys.exit(1)
+    print("ERROR: No 'resources' key found in CrowdStrike API response!")
+    print("Full response below for debugging:")
+    print(json.dumps(load, indent=2))
+    sys.exit(1)
+
+for i in resources:
     print("Data Feed URL : " + i["dataFeedURL"])
     print("Generated Token : " + i["sessionToken"]["token"])
     dataFeedURL = i["dataFeedURL"]
