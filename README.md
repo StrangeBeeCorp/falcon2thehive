@@ -31,8 +31,14 @@ Running `falcon2thehive` in Docker is a convenient way to keep your environment 
 docker build -t falcon2thehive .
 ```
 
-#### 2. Set up your .env accordingly
-Make sure to have a well configured `.env`file in your directory.
+#### 2. Set up your `.env` file
+
+1. **Copy the example file**
+```bash
+cp .env.example .env
+```
+1. **Edit `.env` and fill in your actual credentials:**
+
 ```
 CRWD_BASE_URL=https://api.crowdstrike.com
 CRWD_CLIENT_ID=your_client_id
@@ -43,8 +49,8 @@ THEHIVE_API_KEY=your_thehive_api_key
 THEHIVE_ORG=MYORGNAME
 APP_ID=falcon2thehive
 ```
+
 #### 3. Run the Container
-Run:
 ```bash
 docker run -d \
   --restart unless-stopped \
@@ -56,20 +62,6 @@ docker run -d \
 
 ```bash
 docker logs -f f2h
-```
-
-#### Alternative: Passing environment variables via `-e` flags 
-You can also set environment variables directly in the `docker run` command (for quick testing):
-
-```bash
-docker run -d \
-  --restart unless-stopped \
-  -e CRWD_BASE_URL="https://api.crowdstrike.com" \
-  -e CRWD_CLIENT_ID="your_client_id" \
-  -e CRWD_CLIENT_SECRET="your_client_secret" \
-  -e THEHIVE_URL="http://my-thehive-url.com" \
-  -e THEHIVE_API_KEY="your_thehive_api_key" \
-  --name f2h falcon2thehive
 ```
 
 #### Stopping, Restarting, and Updating Environment Variables
@@ -88,11 +80,26 @@ To change environment variables:
 docker stop f2h
 docker rm f2h
 ```
-2. Start a new one with updated -e flags or an updated .env file:
+2. Start a new one with updated `-e` flags or an updated `.env` file:
 
 ```bash
 docker run -d --restart unless-stopped --env-file .env --name f2h falcon2thehive
 ```
+
+#### Alternative: Passing environment variables via `-e` flags 
+You can also set environment variables directly in the `docker run` command (for quick testing):
+
+```bash
+docker run -d \
+  --restart unless-stopped \
+  -e CRWD_BASE_URL="https://api.crowdstrike.com" \
+  -e CRWD_CLIENT_ID="your_client_id" \
+  -e CRWD_CLIENT_SECRET="your_client_secret" \
+  -e THEHIVE_URL="http://my-thehive-url.com" \
+  -e THEHIVE_API_KEY="your_thehive_api_key" \
+  --name f2h falcon2thehive
+```
+
 
 ### ⚙️ Manual Python Installation
 
