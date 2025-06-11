@@ -19,8 +19,8 @@ from thehive4py.types.alert import InputAlert
 from thehive4py.errors import TheHiveError
 
 
-# Function to create TheHive InputAlert
-def create_alert_object(data):
+# Function to create TheHive InputAlert for detection events
+def create_alert_detection(data):
     # Map severity names to numerical values
     severity_mapping = {
         'Informational': 1,
@@ -90,7 +90,6 @@ def create_alert_object(data):
         fqdn = f"{device_info['hostname']}.{device_info['machine_domain']}"
         observables.append({'dataType': 'fqdn', 'data': fqdn, 'tags': ["machine-domain"]})
 
-
     # Extract MITRE ATT&CK techniques
     if 'technique_id' in data and data['technique_id'] and not data['technique_id'].startswith('CS'):
         mitreTags.append(data['technique_id'])
@@ -108,12 +107,9 @@ def create_alert_object(data):
         }
         procedures.append(procedure)
         
-
-        
     # Title
     title = f"[{severity_name}] Detection on {hostname}: {technique} - {detection_name}"
 
-    
     # Description update
     if description:
         description += "\n\n"
@@ -121,8 +117,6 @@ def create_alert_object(data):
         description = ""
 
     description += f"[Link to CrowdStrike Alert]({falcon_link})\n\n"
-
-    # Add the entire data in a code block formatted as JSON
     description += f"```json\n{json.dumps(data, indent=4)}\n```"
 
     # Alert constrution
@@ -138,7 +132,6 @@ def create_alert_object(data):
         'tags': tags,
         'procedures': procedures if procedures else []
     }
-
     return input_alert
 
 # set offset high to only get new events.
@@ -184,8 +177,6 @@ response = falcon.list_available_streams(app_id=appId, format="flatjson")
 dump = json.dumps(response, sort_keys=True, indent=4)
 #print(dump)    #DEBUG
 
-
-
 response2use = str(response).replace("\'", "\"")
 load = json.loads(response2use)
 
@@ -218,33 +209,6 @@ for i in resources:
 url = dataFeedURL
 token = generatedToken
 
-'''
-def refresh_stream():
-    # refresh active streams
-    # @params: None
-    # @returns: the access_token
-    print("INFO : Refreshing Stream Token")
-    print('URL used for refresh operation : %s' % refreshURL)
-    refreshHeaders = {'Authorization': "bearer %s" % generatedToken, \
-            'Accept': "application/json", \
-            'Content-Type': "application/json"}
-    print("headers : %s" % refreshHeaders)
-    
-    try:
-        response = requests.request("POST", refreshURL, headers=refreshHeaders)
-        
-        print("Response : %s" % response)
-        if (response.status_code == 200):
-            return True
-        else:
-            return False
-
-    except Exception as e:
-        self.error_handler(e)
-        print("Unable to refresh stream_token")
-        return False
-
-'''
 def refresh_stream():
     # Define the custom header
     extra_headers = {
@@ -275,13 +239,9 @@ def refresh_stream():
         return False
         print("Unable to refresh stream_token")
 
-
-
 def error_handler(self, e):
     traceback.print_exc()
     print(e)
-
-
 
 ####################################
 ## BELOW WE LOOK FOR NEW DETECTIONS
@@ -294,50 +254,36 @@ try:
     headers = {'Authorization': 'Token %s' % token, 'Connection': 'Keep-Alive'}
     r = requests.get(url, headers=headers, stream=True)
     #print("Streaming API Connection established. Thread: %s" % id)
-    
-    
-   
-
 
     for line in r.iter_lines():
         try:
             if line:
                 decoded_line = line.decode('utf-8')
-
                 print("Got a new message, decoding to JSON...")
                 decoded_line = json.loads(decoded_line)
                 print(decoded_line)
 
+                # Support all event types in a dispatcher
+                event_type = (
+                    decoded_line.get("metadata.eventType") or
+                    (decoded_line.get("metadata", {}) or {}).get("eventType")
+                )
+                print("event_type: '%s'" % event_type)
+                event_payload = decoded_line.get("event", decoded_line)
 
-                #if self.was_event_handled(decoded_line):
-                #    print("This is not a new event, already handled!")
-                #else:
-                #print("This is a new event!")
-                #metadata_object = decoded_line.get('metadata', {})
-                #print('type(metadata_object): %s' % type(metadata_object))
-                #print('metadata_object: %s' % metadata_object)
-                #isDetectionSummaryEvent = metadata_object.get('eventType')
-           
-                isDetectionSummaryEvent = decoded_line.get("metadata.eventType")
-            
-                print("isDetectionSummaryEvent: '%s'" % isDetectionSummaryEvent)
-                if (isDetectionSummaryEvent == "DetectionSummaryEvent"):
-                    detection_summary_event = decoded_line
-
-                    # Create the alert
-                    try:
-                        if 'event' in detection_summary_event:
-                            new_alert = hive.alert.create(alert=create_alert_object(detection_summary_event["event"]))
-                        else:
-                            new_alert = hive.alert.create(alert=create_alert_object(detection_summary_event))
-                    except TheHiveError as e:
-                        print(f"An error occurred: {e.message}")
-                        if e.response:
-                            print(f"Response status code: {e.response.status_code}")
-                            print(f"Response content: {e.response.text}")
-                    except Exception as e:
-                        print(f"An unexpected error occurred: {e}")
-
+                try:
+                    if event_type in ("DetectionSummaryEvent", "EppDetectionSummaryEvent"):
+                        new_alert = hive.alert.create(alert=create_alert_detection(event_payload))
+                    else:
+                        print(f"Unsupported event_type: {event_type}")
+                        continue
+                except TheHiveError as e:
+                    print(f"An error occurred: {e.message}")
+                    if e.response:
+                        print(f"Response status code: {e.response.status_code}")
+                        print(f"Response content: {e.response.text}")
+                except Exception as e:
+                    print(f"An unexpected error occurred: {e}")
 
             # Refreshing stream 
             if (int(time.time()) > (900 + epoch_time)):
@@ -345,20 +291,14 @@ try:
                 if (refresh_stream()):
                     print("Stream Refresh Succeded")
                     epoch_time = int(time.time())
-                #else:
-                    # unable to refresh token, start from scratch
-                    #return
             
         except Exception as e:
             print("Error reading stream chunk")
             print("request status code %s\n%s" % (r.status_code, traceback.format_exc()))
-            
-            
 
 except Exception as e:
     print("Error reading last stream chunk")
     print("request status code %s\n%s" % (r.status_code, traceback.format_exc()))
     os._exit(1)
-
 
 sys.exit(0)
