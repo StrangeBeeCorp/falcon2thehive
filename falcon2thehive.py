@@ -61,6 +61,29 @@ def is_mitre_attack_id(val):
     return bool(re.fullmatch(r"T\d{4}(\.\d{3})?", str(val)))
 
 
+def normalize_timestamp(ts):
+    """
+    Normalize a timestamp to milliseconds since UNIX epoch (1970-01-01).
+    Handles CrowdStrike formats: ms-since-epoch, s-since-epoch, FILETIME 100ns ticks.
+    """
+    if ts is None:
+        return int(time.time() * 1000)
+    try:
+        ts = int(ts)
+        # FILETIME 100ns ticks since 1601 (very large int)
+        if ts > 10**15:
+            ms = (ts // 10_000) - 11644473600000
+            if ms > 0:
+                return ms
+        elif ts > 10**12:
+            return ts  # already ms since epoch
+        elif ts > 10**9:
+            return ts * 1000  # likely seconds since epoch
+    except Exception:
+        pass
+    return int(time.time() * 1000)
+
+
 def create_alert_detection(data):
     metadata = data.get("metadata", {})
     event = data.get("event", data)
@@ -110,13 +133,8 @@ def create_alert_detection(data):
         or event.get("ProcessStartTime")
         or metadata.get("eventCreationTime")
         or data.get("timestamp")
-        or int(time.time() * 1000)
     )
-    if isinstance(eventTimestamp, str):
-        try:
-            eventTimestamp = int(eventTimestamp)
-        except Exception:
-            eventTimestamp = int(time.time() * 1000)
+    eventTimestamp = normalize_timestamp(eventTimestamp)
 
     falcon_link = event.get("FalconHostLink") or data.get("falcon_host_link") or ""
     sourceRef = (
@@ -206,7 +224,7 @@ def create_alert_detection(data):
             observables.append(safe_observable(dtype, val.strip()))
 
     # NetworkAccesses
-    for net in event.get("NetworkAccesses", []):
+    for net in event.get("NetworkAccesses", []) or []:
         for ip_field in ["LocalAddress", "RemoteAddress"]:
             ip = net.get(ip_field)
             if ip:
@@ -223,13 +241,23 @@ def create_alert_detection(data):
             observables.append(safe_observable("other", proto, ["protocol"]))
 
     # DnsRequests
-    for dns in event.get("DnsRequests", []):
+    for dns in event.get("DnsRequests", []) or []:
         domain = dns.get("DomainName")
         if domain:
             observables.append(safe_observable("domain", domain))
         reqtype = dns.get("RequestType")
         if reqtype:
             observables.append(safe_observable("other", reqtype, ["dns_query_type"]))
+
+    # FilesWritten
+    for fw in event.get("FilesWritten", []) or []:
+        fw_filename = fw.get("FileName")
+        fw_filepath = fw.get("FilePath")
+        if fw_filename:
+            tags_fw = [fw_filepath] if fw_filepath else []
+            observables.append(safe_observable("filename", fw_filename, tags_fw))
+        if fw_filepath:
+            observables.append(safe_observable("other", fw_filepath, ["filepath"]))
 
     # Title
     title = f"[{severity_name}] Detection on {hostname}: {technique} - {detection_name}"
@@ -242,6 +270,159 @@ def create_alert_detection(data):
     description += f"```json\n{json.dumps(data, indent=4)}\n```"
 
     # Procedures (only valid mitre att&ck techniques IDs)
+    procedures = []
+    for tag in mitreTags:
+        procedures.append({"patternId": tag, "occurDate": eventTimestamp})
+
+    input_alert: InputAlert = {
+        "type": eventType,
+        "source": source,
+        "sourceRef": sourceRef,
+        "title": title,
+        "severity": adjustedSeverity,
+        "description": description,
+        "date": eventTimestamp,
+        "observables": observables if observables else [],
+        "tags": tags,
+    }
+    if procedures:
+        input_alert["procedures"] = procedures
+    return input_alert
+
+
+def create_alert_identity(data):
+    metadata = data.get("metadata", {})
+    event = data.get("event", data)
+    eventType = data.get("type", "external")
+    source = "CrowdStrike"
+
+    severity_mapping = {
+        "informational": 1,
+        "info": 1,
+        "low": 1,
+        "medium": 2,
+        "high": 3,
+        "critical": 4,
+    }
+
+    # Title/description/name
+    detection_name = (
+        event.get("DetectName")
+        or event.get("IncidentType")
+        or event.get("Category")
+        or data.get("display_name")
+        or "No Title"
+    )
+    description_field = (
+        event.get("DetectDescription")
+        or event.get("IncidentDescription")
+        or event.get("Category")
+        or data.get("description")
+        or ""
+    )
+    severity_name = (
+        event.get("SeverityName") or data.get("severity_name") or ""
+    ).lower() or "informational"
+    severity_value = event.get("Severity") or data.get("severity") or 1
+    # Normalize severity (CrowdStrike can use 0,1,2,3,4, or even 70 etc)
+    if isinstance(severity_value, int) and severity_value > 4:
+        if severity_value >= 80:
+            adjustedSeverity = 4
+        elif severity_value >= 70:
+            adjustedSeverity = 3
+        elif severity_value >= 50:
+            adjustedSeverity = 2
+        else:
+            adjustedSeverity = 1
+    else:
+        adjustedSeverity = severity_mapping.get(severity_name, 1)
+
+    eventTimestamp = (
+        event.get("EventCreationTime")
+        or event.get("eventCreationTime")
+        or event.get("StartTime")
+        or event.get("ContextTimeStamp")
+        or metadata.get("eventCreationTime")
+        or data.get("timestamp")
+    )
+    eventTimestamp = normalize_timestamp(eventTimestamp)
+
+    falcon_link = event.get("FalconHostLink") or data.get("falcon_host_link") or ""
+    sourceRef = (
+        event.get("IdentityProtectionIncidentId")
+        or event.get("DetectId")
+        or data.get("id")
+        or str(time.time())
+    )
+
+    # MITRE: only if valid ATT&CK technique
+    mitreTags = []
+    if "technique_id" in data and is_mitre_attack_id(data["technique_id"]):
+        mitreTags.append(data["technique_id"])
+    if "Technique" in event and is_mitre_attack_id(event["Technique"]):
+        mitreTags.append(event["Technique"])
+
+    tags = ["CrowdStrike", "Identity"] + mitreTags
+
+    # Observables
+    observables = []
+    # Username (might include domain)
+    user = event.get("UserName") or event.get("SourceAccountName")
+    domain = None
+    if user and "\\" in user:
+        domain, username = user.split("\\", 1)
+    else:
+        username = user
+
+    if username:
+        observables.append(safe_observable("other", username, ["username"]))
+    if domain:
+        observables.append(safe_observable("domain", domain, ["account-domain"]))
+
+    # SourceAccountDomain
+    if event.get("SourceAccountDomain"):
+        observables.append(
+            safe_observable("domain", event["SourceAccountDomain"], ["account-domain"])
+        )
+
+    if event.get("SourceAccountObjectSid"):
+        observables.append(
+            safe_observable("other", event["SourceAccountObjectSid"], ["sid"])
+        )
+
+    # Endpoint (workstation/computer)
+    if event.get("EndpointName"):
+        observables.append(
+            safe_observable("hostname", event["EndpointName"], ["endpoint"])
+        )
+    # IP
+    if event.get("EndpointIp"):
+        observables.append(safe_observable("ip", event["EndpointIp"], ["endpoint-ip"]))
+
+    # Any extra unique IDs
+    if event.get("IdentityProtectionIncidentId"):
+        observables.append(
+            safe_observable(
+                "other", event["IdentityProtectionIncidentId"], ["incident-id"]
+            )
+        )
+    if event.get("DetectId"):
+        observables.append(safe_observable("other", event["DetectId"], ["detect-id"]))
+
+    # Title
+    technique = event.get("Technique", "").strip() or "Unknown Technique"
+    title = (
+        f"[{severity_name.capitalize()}] Identity Alert: {technique} - {detection_name}"
+    )
+
+    # Description
+    description = description_field.strip()
+    if description:
+        description += "\n\n"
+    description += f"[Link to CrowdStrike Alert]({falcon_link})\n\n"
+    description += f"```json\n{json.dumps(data, indent=4)}\n```"
+
+    # Procedures: only valid MITRE IDs
     procedures = []
     for tag in mitreTags:
         procedures.append({"patternId": tag, "occurDate": eventTimestamp})
@@ -407,6 +588,13 @@ if __name__ == "__main__":
                         ):
                             new_alert = hive.alert.create(
                                 alert=create_alert_detection(event_payload)
+                            )
+                        elif event_type in (
+                            "IdentityProtectionEvent",
+                            "IdpDetectionSummaryEvent",
+                        ):
+                            new_alert = hive.alert.create(
+                                alert=create_alert_identity(event_payload)
                             )
                         else:
                             print(f"Unsupported event_type: {event_type}")
