@@ -45,16 +45,31 @@ THEHIVE_OBSERVABLE_TYPES = {
 
 def safe_observable(dataType, data, tags=None):
     """Map unknown types to 'other', preserve intent in tags."""
-    tags = tags or []
-    # Always use "ip" for both IPv4 and IPv6, and add tag if IPv6
+    if data is None or str(data).strip() == "":
+        return None
+    dataType = str(dataType)
+    data = str(data)
+    if tags is None:
+        tags = []
+    elif not isinstance(tags, list):
+        tags = [tags]
+    tags = [str(tag) for tag in tags if tag and str(tag).strip() != ""]
+
     if dataType in ("ip", "ipv6", "ipv4"):
         dataType = "ip"
-        if ":" in str(data) and "ipv6" not in tags:
+        if ":" in data and "ipv6" not in tags:
             tags.append("ipv6")
+
     if dataType not in THEHIVE_OBSERVABLE_TYPES:
-        tags = tags + [dataType]
+        if dataType not in tags and dataType != "other":
+            tags.append(dataType)
         dataType = "other"
-    return {"dataType": dataType, "data": data, "tags": tags}
+
+    return {
+        "dataType": dataType,
+        "data": data,
+        "tags": sorted(set(tags))
+    }
 
 
 def is_mitre_attack_id(val):
@@ -87,7 +102,12 @@ def normalize_timestamp(ts):
 def create_alert_detection(data):
     metadata = data.get("metadata", {})
     event = data.get("event", data)
-    eventType = data.get("type", "external")
+    eventType = (
+        metadata.get("eventType")
+        or data.get("type")
+        or event.get("type")
+        or "external"
+    )
     source = "CrowdStrike"
 
     severity_mapping = {
@@ -275,25 +295,32 @@ def create_alert_detection(data):
         procedures.append({"patternId": tag, "occurDate": eventTimestamp})
 
     input_alert: InputAlert = {
-        "type": eventType,
-        "source": source,
-        "sourceRef": sourceRef,
-        "title": title,
-        "severity": adjustedSeverity,
-        "description": description,
-        "date": eventTimestamp,
-        "observables": observables if observables else [],
-        "tags": tags,
+        "type": str(eventType),
+        "source": str(source),
+        "sourceRef": str(sourceRef),
+        "title": str(title),
+        "severity": int(adjustedSeverity),
+        "description": str(description),
+        "date": int(eventTimestamp),
+        "observables": [o for o in observables if o and o.get("data") and o.get("dataType")],
+        "tags": [str(t) for t in tags if t],
     }
     if procedures:
         input_alert["procedures"] = procedures
+    if falcon_link:
+        input_alert["externalLink"] = str(falcon_link)
     return input_alert
 
 
 def create_alert_identity(data):
     metadata = data.get("metadata", {})
     event = data.get("event", data)
-    eventType = data.get("type", "external")
+    eventType = (
+        metadata.get("eventType")
+        or data.get("type")
+        or event.get("type")
+        or "external"
+    )
     source = "CrowdStrike"
 
     severity_mapping = {
@@ -400,14 +427,14 @@ def create_alert_identity(data):
         observables.append(safe_observable("ip", event["EndpointIp"], ["endpoint-ip"]))
 
     # Any extra unique IDs
-    if event.get("IdentityProtectionIncidentId"):
-        observables.append(
-            safe_observable(
-                "other", event["IdentityProtectionIncidentId"], ["incident-id"]
-            )
-        )
-    if event.get("DetectId"):
-        observables.append(safe_observable("other", event["DetectId"], ["detect-id"]))
+    # if event.get("IdentityProtectionIncidentId"):
+    #     observables.append(
+    #         safe_observable(
+    #             "other", event["IdentityProtectionIncidentId"], ["incident-id"]
+    #         )
+    #     )
+    # if event.get("DetectId"):
+    #     observables.append(safe_observable("other", event["DetectId"], ["detect-id"]))
 
     # Title
     technique = event.get("Technique", "").strip() or "Unknown Technique"
@@ -428,18 +455,204 @@ def create_alert_identity(data):
         procedures.append({"patternId": tag, "occurDate": eventTimestamp})
 
     input_alert: InputAlert = {
-        "type": eventType,
-        "source": source,
-        "sourceRef": sourceRef,
-        "title": title,
-        "severity": adjustedSeverity,
-        "description": description,
-        "date": eventTimestamp,
-        "observables": observables if observables else [],
-        "tags": tags,
+        "type": str(eventType),
+        "source": str(source),
+        "sourceRef": str(sourceRef),
+        "title": str(title),
+        "severity": int(adjustedSeverity),
+        "description": str(description),
+        "date": int(eventTimestamp),
+        "observables": [o for o in observables if o and o.get("data") and o.get("dataType")],
+        "tags": [str(t) for t in tags if t],
     }
     if procedures:
         input_alert["procedures"] = procedures
+    if falcon_link:
+        input_alert["externalLink"] = str(falcon_link)
+    return input_alert
+
+
+def create_alert_mobile(data):
+    metadata = data.get("metadata", {})
+    event = data.get("event", data)
+    eventType = (
+        metadata.get("eventType")
+        or data.get("type")
+        or event.get("type")
+        or "external"
+    )
+    source = "CrowdStrike"
+
+    severity_mapping = {
+        "informational": 1,
+        "info": 1,
+        "low": 1,
+        "medium": 2,
+        "high": 3,
+        "critical": 4,
+    }
+
+    detection_name = event.get("DetectName") or "Mobile Detection"
+    description_field = event.get("DetectDescription") or ""
+    severity_value = event.get("Severity") or 1
+
+    # Normalize severity
+    if isinstance(severity_value, int) and severity_value > 4:
+        if severity_value >= 80:
+            adjustedSeverity = 4
+        elif severity_value >= 70:
+            adjustedSeverity = 3
+        elif severity_value >= 50:
+            adjustedSeverity = 2
+        else:
+            adjustedSeverity = 1
+    else:
+        adjustedSeverity = severity_mapping.get(str(severity_value).lower(), 1)
+
+    eventTimestamp = (
+        event.get("EventCreationTime")
+        or event.get("eventCreationTime")
+        or event.get("ContextTimeStamp")
+        or metadata.get("eventCreationTime")
+        or data.get("timestamp")
+    )
+    eventTimestamp = normalize_timestamp(eventTimestamp)
+
+    falcon_link = event.get("FalconHostLink") or ""
+    sourceRef = str(
+        event.get("MobileDetectionId") or event.get("DetectId") or str(time.time())
+    )
+    computer_name = event.get("ComputerName") or ""
+    user = event.get("UserName") or ""
+    technique = event.get("Technique", "").strip() or "Unknown Technique"
+
+    tags = ["CrowdStrike", "Mobile"]
+    # MITRE
+    if "TechniqueId" in event and is_mitre_attack_id(event["TechniqueId"]):
+        tags.append(event["TechniqueId"])
+
+    procedures = []
+    if "TechniqueId" in event and is_mitre_attack_id(event["TechniqueId"]):
+        procedures.append({
+            "patternId": event["TechniqueId"],
+            "occurDate": eventTimestamp
+        })
+
+    # Observables
+    observables = []
+    # Device ID
+    # if event.get("SensorId"):
+    #     observables.append(safe_observable("other", event["SensorId"], ["sensor-id"]))
+    # Detection/Mobile ID (maybe better managed as custom-field : requires customer specific configuration)
+    # if event.get("MobileDetectionId"):
+    #     observables.append(
+    #         safe_observable(
+    #             "other", str(event["MobileDetectionId"]), ["mobile-detection-id"]
+    #         )
+    #     )
+    # ComputerName
+    if computer_name:
+        observables.append(safe_observable("hostname", computer_name, ["device"]))
+    # User
+    if user:
+        observables.append(safe_observable("other", user, ["username"]))
+    # Falcon Host Link
+    # if falcon_link:
+    #     observables.append(safe_observable("url", falcon_link, ["falcon-link"]))
+
+    # MobileAppsDetails
+    for app in event.get("MobileAppsDetails", []) or []:
+        appid = app.get("AppIdentifier")
+        label = app.get("AndroidAppLabel")
+        apk = app.get("ImageFileName")
+        version = app.get("AndroidAppVersionName")
+        if appid:
+            observables.append(safe_observable("other", appid, ["app-id"]))
+        if label:
+            observables.append(safe_observable("other", label, ["app-label"]))
+        if apk:
+            observables.append(safe_observable("filename", apk, ["apk"]))
+        if version:
+            observables.append(safe_observable("other", version, ["app-version"]))
+
+    # Network Connections
+    for net in event.get("MobileNetworkConnections", []) or []:
+        if net.get("RemoteAddress"):
+            observables.append(safe_observable("ip", net["RemoteAddress"], ["remote"]))
+        if net.get("LocalAddress"):
+            observables.append(safe_observable("ip", net["LocalAddress"], ["local"]))
+        if net.get("Url"):
+            observables.append(safe_observable("url", net["Url"], ["remote-url"]))
+        if net.get("Protocol"):
+            observables.append(
+                safe_observable("other", str(net["Protocol"]), ["protocol"])
+            )
+        if net.get("RemotePort"):
+            observables.append(
+                safe_observable("other", str(net["RemotePort"]), ["remote-port"])
+            )
+        if net.get("AccessTimestamp"):
+            observables.append(
+                safe_observable(
+                    "other", str(net["AccessTimestamp"]), ["access-timestamp"]
+                )
+            )
+        if net.get("ConnectionDirection"):
+            observables.append(
+                safe_observable(
+                    "other", str(net["ConnectionDirection"]), ["connection-direction"]
+                )
+            )
+
+    # Extra fields as observables
+    if event.get("ApplicationName"):
+        observables.append(
+            safe_observable("other", event["ApplicationName"], ["app-name"])
+        )
+    if event.get("NetworkDetectionType"):
+        observables.append(
+            safe_observable(
+                "other", event["NetworkDetectionType"], ["network-detection-type"]
+            )
+        )
+    # if event.get("PatternId"):
+    #     observables.append(
+    #         safe_observable("other", str(event["PatternId"]), ["pattern-id"])
+    #     )
+    # if event.get("CompositeId"):
+    #     observables.append(
+    #         safe_observable("other", str(event["CompositeId"]), ["composite-id"])
+    #     )
+    # if event.get("Name"):
+    #     observables.append(safe_observable("other", event["Name"], ["detect-name"]))
+    # if event.get("Description"):
+    #     observables.append(
+    #         safe_observable("other", event["Description"], ["description"])
+    #     )
+
+    # Title and Description
+    title = f"[Mobile] {computer_name or ''}: {technique} - {detection_name}"
+    description = description_field.strip()
+    if description:
+        description += "\n\n"
+    description += f"[Link to CrowdStrike Alert]({falcon_link})\n\n"
+    description += f"```json\n{json.dumps(data, indent=4)}\n```"
+
+    input_alert: InputAlert = {
+        "type": str(eventType),
+        "source": str(source),
+        "sourceRef": str(sourceRef),
+        "title": str(title),
+        "severity": int(adjustedSeverity),
+        "description": str(description),
+        "date": int(eventTimestamp),
+        "observables": [o for o in observables if o and o.get("data") and o.get("dataType")],
+        "tags": [str(t) for t in tags if t],
+    }
+    if procedures:
+        input_alert["procedures"] = procedures
+    if falcon_link:
+        input_alert["externalLink"] = str(falcon_link)
     return input_alert
 
 
@@ -595,6 +808,10 @@ if __name__ == "__main__":
                         ):
                             new_alert = hive.alert.create(
                                 alert=create_alert_identity(event_payload)
+                            )
+                        elif event_type in ("MobileDetectionSummaryEvent",):
+                            new_alert = hive.alert.create(
+                                alert=create_alert_mobile(event_payload)
                             )
                         else:
                             print(f"Unsupported event_type: {event_type}")
