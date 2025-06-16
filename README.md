@@ -1,15 +1,35 @@
 # falcon2thehive
 
-A simple Python connector that allows to send your CrowdStrike Falcon detections to The Hive platform.
+**falcon2thehive** is a simple Python connector that streams CrowdStrike Falcon detection events into TheHive, turning Falcon alerts into actionable TheHive Alerts in real time.
 This connector is a *work in progress* and is being developed to be compatible with TheHive 5.
 
 Alerts are generated in TheHive and support the extraction of observables and TTPs, as well as defining a format for the title, description, and tags.
+
+
+```mermaid
+graph LR
+  A[CrowdStrike Falcon]
+  B[falcon2thehive]
+  C[TheHive]
+
+  A -- "streams detections (EventStreams API)" --> B
+  B -- "pushes Alerts" --> C
+```
+
+*falcon2thehive maintains a live connection to the CrowdStrike Falcon EventStreams API and pushes detections to TheHive in real time, as soon as they are available.*
 
 ---
 **Install via:**  
 - 🐳 [**Docker Deployment**](#-docker-deployment) (recommended for most users)  
 - ⚙️ [**Manual Python Installation**](#%EF%B8%8F-manual-python-installation)
 ---
+
+## ✅ Supported CrowdStrike Event Types
+
+- `DetectionSummaryEvent`
+- `EppDetectionSummaryEvent`
+- `IdentityProtectionEvent` / `IdpDetectionSummaryEvent`
+- `MobileDetectionSummaryEvent`
 
 ## 📸 Screenshots
 ### Alert creation
@@ -37,7 +57,7 @@ docker build -t falcon2thehive .
 ```bash
 cp .env.example .env
 ```
-1. **Edit `.env` and fill in your actual credentials:**
+2. **Edit `.env` and fill in your actual credentials:**
 
 ```
 CRWD_BASE_URL=https://api.crowdstrike.com
