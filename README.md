@@ -1,6 +1,7 @@
 # falcon2thehive
 
 **falcon2thehive** is a simple Python connector that streams CrowdStrike Falcon detection events into TheHive, turning Falcon alerts into actionable TheHive Alerts in real time.
+
 This connector is a *work in progress* and is being developed to be compatible with TheHive 5.
 
 Alerts are generated in TheHive and support the extraction of observables and TTPs, as well as defining a format for the title, description, and tags.
@@ -26,8 +27,7 @@ graph LR
 
 ## ✅ Supported CrowdStrike Event Types
 
-- `DetectionSummaryEvent`
-- `EppDetectionSummaryEvent`
+- `DetectionSummaryEvent` / `EppDetectionSummaryEvent`
 - `IdentityProtectionEvent` / `IdpDetectionSummaryEvent`
 - `MobileDetectionSummaryEvent`
 
