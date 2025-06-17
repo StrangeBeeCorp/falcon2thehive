@@ -3,13 +3,17 @@
 from falconpy import EventStreams
 from falconpy import OAuth2
 import json
+import uuid
 import time
-import datetime
+
+# import datetime
 import requests
 import os
 import sys
 import logging
-import threading
+
+# import threading
+from copy import deepcopy
 import traceback
 import re
 import urllib3
@@ -20,6 +24,13 @@ from thehive4py import TheHiveApi
 from thehive4py.types.alert import InputAlert
 from thehive4py.errors import TheHiveError
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    stream=sys.stdout,
+)
+log = logging.getLogger("falcon2thehive")
 
 # TheHive supported observable types
 THEHIVE_OBSERVABLE_TYPES = {
@@ -65,11 +76,7 @@ def safe_observable(dataType, data, tags=None):
             tags.append(dataType)
         dataType = "other"
 
-    return {
-        "dataType": dataType,
-        "data": data,
-        "tags": sorted(set(tags))
-    }
+    return {"dataType": dataType, "data": data, "tags": sorted(set(tags))}
 
 
 def is_mitre_attack_id(val):
@@ -99,24 +106,105 @@ def normalize_timestamp(ts):
     return int(time.time() * 1000)
 
 
-def create_alert_detection(data):
-    metadata = data.get("metadata", {})
-    event = data.get("event", data)
-    eventType = (
-        metadata.get("eventType")
-        or data.get("type")
-        or event.get("type")
-        or "external"
-    )
-    source = "CrowdStrike"
+def build_source_ref(event: dict, metadata: dict | None = None) -> str:
+    """
+    CompositeId ▶ DetectId ▶ Identity/Mobile IDs ▶ fallback.
+    Ensures global uniqueness and ≤255 chars.
+    """
+    meta = metadata or {}
+    cid = (event.get("CustomerId") or meta.get("customerId") or "").strip()
 
-    severity_mapping = {
+    def _strip(x):
+        return str(x).strip() if x else None
+
+    for key in (
+        "CompositeId",
+        "DetectId",
+        "IdentityProtectionIncidentId",
+        "MobileDetectionId",
+    ):
+        val = _strip(event.get(key))
+        if val:
+            return f"{cid}:{val}"[:255] if key == "DetectId" and cid else val[:255]
+
+    # timestamp-based fallback
+    return f"ts-{int(time.time()*1000)}-{uuid.uuid4().hex[:6]}"[:255]
+
+
+def cs_to_thehive_severity(value_or_name: str | int) -> int:
+    """
+    Accepts CrowdStrike Severity (0-100, 1-4, or string like 'High')
+    and returns TheHive severity 1-4.
+    """
+    name_map = {
         "informational": 1,
+        "info": 1,
         "low": 1,
         "medium": 2,
         "high": 3,
         "critical": 4,
     }
+    try:
+        num = int(value_or_name)
+        if num > 4:  # 0-100 scale
+            return 4 if num >= 80 else 3 if num >= 70 else 2 if num >= 50 else 1
+        return max(1, min(num, 4))
+    except Exception:
+        return name_map.get(str(value_or_name).lower(), 1)
+
+
+def push_alert(inputalert: InputAlert, hive: TheHiveApi):
+    """
+    Send an alert once. If TheHive returns 404 'Pattern not found'
+    (unknown ATT&CK ID), drop the procedures list and retry once.
+    """
+    alert = deepcopy(inputalert)
+
+    try:
+        return hive.alert.create(alert=alert)
+
+    except TheHiveError as err_th:
+        resp = getattr(err_th, "response", None)
+        status_code = getattr(resp, "status_code", None)
+        body_text = getattr(resp, "text", "") or str(err_th)
+        body_lc = body_text.lower()
+
+        # ── DUPLICATE ────────────────────────────────────────────────
+        if "already exists" in body_lc or (
+            status_code in (400, 409) and "exists" in body_lc
+        ):
+            log.info("Duplicate alert skipped: %s", alert.get("sourceRef"))
+            log.debug("TheHive said: %s", body_text.strip())
+            return None
+
+        # ── UNKNOWN ATT&CK PATTERN ──────────────────────────────────
+        if ("pattern not found" in body_lc or status_code == 404) and alert.pop(
+            "procedures", None
+        ):
+            log.warning(
+                "Unknown ATT&CK pattern – resending %s without procedures",
+                alert.get("sourceRef"),
+            )
+            try:
+                return hive.alert.create(alert=alert)
+            except TheHiveError as err_retry:
+                log.error("Retry without procedures failed: %s", err_retry)
+                raise
+
+        # ── ALL OTHER ERRORS ────────────────────────────────────────
+        log.error(
+            "Unhandled TheHive error (status %s): %s", status_code, body_text.strip()
+        )
+        raise
+
+
+def create_alert_detection(data):
+    metadata = data.get("metadata", {})
+    event = data.get("event", data)
+    eventType = (
+        metadata.get("eventType") or data.get("type") or event.get("type") or "external"
+    )
+    source = "CrowdStrike"
 
     detection_name = (
         event.get("DetectName")
@@ -130,22 +218,18 @@ def create_alert_detection(data):
         or data.get("description")
         or ""
     )
-    severity_name = (
-        event.get("SeverityName") or data.get("severity_name") or ""
-    ).capitalize() or "Informational"
-    severity_value = event.get("Severity") or data.get("severity") or 1
-    # Normalize large CrowdStrike severity to TheHive (1–4)
-    if isinstance(severity_value, int) and severity_value > 4:
-        if severity_value >= 80:
-            adjustedSeverity = 4
-        elif severity_value >= 70:
-            adjustedSeverity = 3
-        elif severity_value >= 50:
-            adjustedSeverity = 2
-        else:
-            adjustedSeverity = 1
-    else:
-        adjustedSeverity = severity_mapping.get(severity_name.lower(), 1)
+
+    # Severity
+    sev_raw = (
+        event.get("Severity")
+        or event.get("SeverityName")
+        or data.get("severity")
+        or "informational"
+    )
+    adjustedSeverity = cs_to_thehive_severity(sev_raw)
+    severity_name = ["", "Informational", "Low", "Medium", "High", "Critical"][
+        adjustedSeverity
+    ]
 
     eventTimestamp = (
         event.get("EventCreationTime")
@@ -157,12 +241,7 @@ def create_alert_detection(data):
     eventTimestamp = normalize_timestamp(eventTimestamp)
 
     falcon_link = event.get("FalconHostLink") or data.get("falcon_host_link") or ""
-    sourceRef = (
-        event.get("DetectId")
-        or event.get("CompositeId")
-        or data.get("id")
-        or str(time.time())
-    )
+    sourceRef = build_source_ref(event, metadata)
     hostname = (
         event.get("Hostname")
         or event.get("ComputerName")
@@ -302,7 +381,9 @@ def create_alert_detection(data):
         "severity": int(adjustedSeverity),
         "description": str(description),
         "date": int(eventTimestamp),
-        "observables": [o for o in observables if o and o.get("data") and o.get("dataType")],
+        "observables": [
+            o for o in observables if o and o.get("data") and o.get("dataType")
+        ],
         "tags": [str(t) for t in tags if t],
     }
     if procedures:
@@ -316,21 +397,9 @@ def create_alert_identity(data):
     metadata = data.get("metadata", {})
     event = data.get("event", data)
     eventType = (
-        metadata.get("eventType")
-        or data.get("type")
-        or event.get("type")
-        or "external"
+        metadata.get("eventType") or data.get("type") or event.get("type") or "external"
     )
     source = "CrowdStrike"
-
-    severity_mapping = {
-        "informational": 1,
-        "info": 1,
-        "low": 1,
-        "medium": 2,
-        "high": 3,
-        "critical": 4,
-    }
 
     # Title/description/name
     detection_name = (
@@ -347,22 +416,17 @@ def create_alert_identity(data):
         or data.get("description")
         or ""
     )
-    severity_name = (
-        event.get("SeverityName") or data.get("severity_name") or ""
-    ).lower() or "informational"
-    severity_value = event.get("Severity") or data.get("severity") or 1
-    # Normalize severity (CrowdStrike can use 0,1,2,3,4, or even 70 etc)
-    if isinstance(severity_value, int) and severity_value > 4:
-        if severity_value >= 80:
-            adjustedSeverity = 4
-        elif severity_value >= 70:
-            adjustedSeverity = 3
-        elif severity_value >= 50:
-            adjustedSeverity = 2
-        else:
-            adjustedSeverity = 1
-    else:
-        adjustedSeverity = severity_mapping.get(severity_name, 1)
+    # Severity
+    sev_raw = (
+        event.get("Severity")
+        or event.get("SeverityName")
+        or data.get("severity")
+        or "informational"
+    )
+    adjustedSeverity = cs_to_thehive_severity(sev_raw)
+    severity_name = ["", "Informational", "Low", "Medium", "High", "Critical"][
+        adjustedSeverity
+    ]
 
     eventTimestamp = (
         event.get("EventCreationTime")
@@ -375,12 +439,7 @@ def create_alert_identity(data):
     eventTimestamp = normalize_timestamp(eventTimestamp)
 
     falcon_link = event.get("FalconHostLink") or data.get("falcon_host_link") or ""
-    sourceRef = (
-        event.get("IdentityProtectionIncidentId")
-        or event.get("DetectId")
-        or data.get("id")
-        or str(time.time())
-    )
+    sourceRef = build_source_ref(event, metadata)
 
     # MITRE: only if valid ATT&CK technique
     mitreTags = []
@@ -462,7 +521,9 @@ def create_alert_identity(data):
         "severity": int(adjustedSeverity),
         "description": str(description),
         "date": int(eventTimestamp),
-        "observables": [o for o in observables if o and o.get("data") and o.get("dataType")],
+        "observables": [
+            o for o in observables if o and o.get("data") and o.get("dataType")
+        ],
         "tags": [str(t) for t in tags if t],
     }
     if procedures:
@@ -476,38 +537,24 @@ def create_alert_mobile(data):
     metadata = data.get("metadata", {})
     event = data.get("event", data)
     eventType = (
-        metadata.get("eventType")
-        or data.get("type")
-        or event.get("type")
-        or "external"
+        metadata.get("eventType") or data.get("type") or event.get("type") or "external"
     )
     source = "CrowdStrike"
 
-    severity_mapping = {
-        "informational": 1,
-        "info": 1,
-        "low": 1,
-        "medium": 2,
-        "high": 3,
-        "critical": 4,
-    }
-
     detection_name = event.get("DetectName") or "Mobile Detection"
     description_field = event.get("DetectDescription") or ""
-    severity_value = event.get("Severity") or 1
 
-    # Normalize severity
-    if isinstance(severity_value, int) and severity_value > 4:
-        if severity_value >= 80:
-            adjustedSeverity = 4
-        elif severity_value >= 70:
-            adjustedSeverity = 3
-        elif severity_value >= 50:
-            adjustedSeverity = 2
-        else:
-            adjustedSeverity = 1
-    else:
-        adjustedSeverity = severity_mapping.get(str(severity_value).lower(), 1)
+    # Severity
+    sev_raw = (
+        event.get("Severity")
+        or event.get("SeverityName")
+        or data.get("severity")
+        or "informational"
+    )
+    adjustedSeverity = cs_to_thehive_severity(sev_raw)
+    severity_name = ["", "Informational", "Low", "Medium", "High", "Critical"][
+        adjustedSeverity
+    ]
 
     eventTimestamp = (
         event.get("EventCreationTime")
@@ -519,9 +566,7 @@ def create_alert_mobile(data):
     eventTimestamp = normalize_timestamp(eventTimestamp)
 
     falcon_link = event.get("FalconHostLink") or ""
-    sourceRef = str(
-        event.get("MobileDetectionId") or event.get("DetectId") or str(time.time())
-    )
+    sourceRef = build_source_ref(event, metadata)
     computer_name = event.get("ComputerName") or ""
     user = event.get("UserName") or ""
     technique = event.get("Technique", "").strip() or "Unknown Technique"
@@ -533,10 +578,9 @@ def create_alert_mobile(data):
 
     procedures = []
     if "TechniqueId" in event and is_mitre_attack_id(event["TechniqueId"]):
-        procedures.append({
-            "patternId": event["TechniqueId"],
-            "occurDate": eventTimestamp
-        })
+        procedures.append(
+            {"patternId": event["TechniqueId"], "occurDate": eventTimestamp}
+        )
 
     # Observables
     observables = []
@@ -646,7 +690,9 @@ def create_alert_mobile(data):
         "severity": int(adjustedSeverity),
         "description": str(description),
         "date": int(eventTimestamp),
-        "observables": [o for o in observables if o and o.get("data") and o.get("dataType")],
+        "observables": [
+            o for o in observables if o and o.get("data") and o.get("dataType")
+        ],
         "tags": [str(t) for t in tags if t],
     }
     if procedures:
@@ -673,21 +719,21 @@ def refresh_stream():
     response = falcon.refresh_active_stream(
         action_name="refresh_active_stream_session", app_id=appId, partition=0
     )
-    print(response)
+    log.debug("refresh_active_stream response: %s", response)
 
     httpCode = response["status_code"]
-    print("HTTP Code is : %s" % httpCode)
+    log.info("Stream-refresh HTTP code: %s", httpCode)
 
     if httpCode == 200:
         return True
     else:
+        log.warning("Unable to refresh stream_token")
         return False
-        print("Unable to refresh stream_token")
 
 
 def error_handler(self, e):
     traceback.print_exc()
-    print(e)
+    log.exception(e)
 
 
 if __name__ == "__main__":
@@ -706,12 +752,12 @@ if __name__ == "__main__":
     appId = os.environ.get("APP_ID", "falcon2thehive")
 
     if not CRWD_CLIENT_ID or not CRWD_CLIENT_SECRET:
-        print(
-            "ERROR: CRWD_CLIENT_ID or CRWD_CLIENT_SECRET environment variable not set."
+        log.critical(
+            "CRWD_CLIENT_ID or CRWD_CLIENT_SECRET environment variable not set."
         )
         sys.exit(1)
     if not THEHIVE_API_KEY:
-        print("ERROR: THEHIVE_API_KEY environment variable not set.")
+        log.critical("THEHIVE_API_KEY environment variable not set.")
         sys.exit(1)
 
     ## INIT - TH & CRWD
@@ -731,7 +777,7 @@ if __name__ == "__main__":
 
     response = falcon.list_available_streams(app_id=appId, format="flatjson")
     dump = json.dumps(response, sort_keys=True, indent=4)
-    # print(dump)    #DEBUG
+    # log.debug(dump)    #DEBUG
 
     response2use = str(response).replace("'", '"')
     load = json.loads(response2use)
@@ -740,29 +786,30 @@ if __name__ == "__main__":
     if not resources:
         errors = load.get("body", {}).get("errors")
         if errors:
-            print("\nCrowdStrike API Error:")
+            log.error("CrowdStrike API Error:")
             for err in errors:
-                print(f" - Code: {err.get('code')}, Message: {err.get('message')}")
-            print("\nTroubleshooting tips:")
-            print(
+                log.error(
+                    " - Code: %s, Message: %s", err.get("code"), err.get("message")
+                )
+            log.info("\nTroubleshooting tips:")
+            log.info(
                 "- Check your CRWD_CLIENT_ID and CRWD_CLIENT_SECRET are correct and valid."
             )
-            print(
+            log.info(
                 "- Check your CRWD_BASE_URL matches your Falcon console region (US-1, EU-1, etc)."
             )
-            print(
+            log.info(
                 "- Make sure your API client has the necessary permissions (at least Event streams: Read)."
             )
-            print("- If you just created credentials, wait a few minutes and retry.")
+            log.info("- If you just created credentials, wait a few minutes and retry.")
             sys.exit(1)
-        print("ERROR: No 'resources' key found in CrowdStrike API response!")
-        print("Full response below for debugging:")
-        print(json.dumps(load, indent=2))
+        log.error("No 'resources' key found in CrowdStrike API response!")
+        log.debug("Full response below for debugging:%s", json.dumps(load, indent=2))
         sys.exit(1)
 
     for i in resources:
-        print("Data Feed URL : " + i["dataFeedURL"])
-        print("Generated Token : " + i["sessionToken"]["token"])
+        log.info("Data Feed URL : %s", i["dataFeedURL"])
+        log.debug("Initial session token: %s", i["sessionToken"]["token"])
         dataFeedURL = i["dataFeedURL"]
         generatedToken = i["sessionToken"]["token"]
         refreshURL = i["refreshActiveSessionURL"]
@@ -777,21 +824,21 @@ if __name__ == "__main__":
         epoch_time = int(time.time())
         headers = {"Authorization": "Token %s" % token, "Connection": "Keep-Alive"}
         r = requests.get(url, headers=headers, stream=True)
-        # print("Streaming API Connection established. Thread: %s" % id)
+        # log.info("Streaming API Connection established. Thread: %s", id)
 
         for line in r.iter_lines():
             try:
                 if line:
                     decoded_line = line.decode("utf-8")
-                    print("Got a new message, decoding to JSON...")
+                    log.debug("Got a new message, decoding to JSON...")
                     decoded_line = json.loads(decoded_line)
-                    print(decoded_line)
+                    log.debug("Decoded JSON: %s", decoded_line)
 
                     # Support all event types in a dispatcher
-                    event_type = decoded_line.get("metadata.eventType") or (
-                        decoded_line.get("metadata", {}) or {}
-                    ).get("eventType")
-                    print("event_type: '%s'" % event_type)
+                    meta = decoded_line.get("metadata", {})
+                    event_type = meta.get("eventType") or decoded_line.get("type")
+
+                    log.debug("event_type=%s", event_type)
                     event_payload = decoded_line.get("event", decoded_line)
 
                     try:
@@ -799,48 +846,48 @@ if __name__ == "__main__":
                             "DetectionSummaryEvent",
                             "EppDetectionSummaryEvent",
                         ):
-                            new_alert = hive.alert.create(
-                                alert=create_alert_detection(event_payload)
-                            )
+                            new_alert = create_alert_detection(event_payload)
+                            push_alert(new_alert, hive)
                         elif event_type in (
                             "IdentityProtectionEvent",
                             "IdpDetectionSummaryEvent",
                         ):
-                            new_alert = hive.alert.create(
-                                alert=create_alert_identity(event_payload)
-                            )
+                            new_alert = create_alert_identity(event_payload)
+                            push_alert(new_alert, hive)
                         elif event_type in ("MobileDetectionSummaryEvent",):
-                            new_alert = hive.alert.create(
-                                alert=create_alert_mobile(event_payload)
-                            )
+                            new_alert = create_alert_mobile(event_payload)
+                            push_alert(new_alert, hive)
                         else:
-                            print(f"Unsupported event_type: {event_type}")
+                            log.warning("Unsupported event_type: %s", event_type)
                             continue
                     except TheHiveError as e:
-                        print(f"An error occurred: {e.message}")
+                        log.error("TheHive error: %s", e)
                         if e.response:
-                            print(f"Response status code: {e.response.status_code}")
-                            print(f"Response content: {e.response.text}")
+                            log.error(
+                                "Response status code: %s", e.response.status_code
+                            )
+                            log.debug("Response content: %s", e.response.text)
                     except Exception as e:
-                        print(f"An unexpected error occurred: {e}")
+                        log.exception("An unexpected error occurred: %s", e)
 
                 # Refreshing stream
                 if int(time.time()) > (900 + epoch_time):
-                    print("Event Window Expired, refreshing Token")
+                    log.info("Event Window Expired, refreshing Token")
                     if refresh_stream():
-                        print("Stream Refresh Succeded")
+                        log.info("Stream refresh succeeded")
                         epoch_time = int(time.time())
 
             except Exception as e:
-                print("Error reading stream chunk")
-                print(
-                    "request status code %s\n%s"
-                    % (r.status_code, traceback.format_exc())
+                log.error("Error reading stream chunk")
+                log.exception(
+                    "request status code %s\n%s", r.status_code, traceback.format_exc()
                 )
 
     except Exception as e:
-        print("Error reading last stream chunk")
-        print("request status code %s\n%s" % (r.status_code, traceback.format_exc()))
+        log.error("Error reading last stream chunk")
+        log.exception(
+            "request status code %s\n%s", r.status_code, traceback.format_exc()
+        )
         os._exit(1)
 
     sys.exit(0)
