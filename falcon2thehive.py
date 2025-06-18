@@ -5,6 +5,7 @@ from falconpy import OAuth2
 import json
 import uuid
 import time
+import signal
 
 # import datetime
 import requests
@@ -736,7 +737,21 @@ def error_handler(self, e):
     log.exception(e)
 
 
+
 if __name__ == "__main__":
+    ## SIGTERM & SIGINT handling for better shutdown
+
+    running = True
+
+    def handle_signal(signum, frame):
+        global running
+        log.info(f"Received signal {signum}, shutting down gracefully.")
+        running = False
+        
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+    
     # set offset high to only get new events.
     offset = 999999999
     # offset = 1
@@ -750,6 +765,10 @@ if __name__ == "__main__":
     THEHIVE_API_KEY = os.environ.get("THEHIVE_API_KEY")
     THEHIVE_ORG = os.environ.get("THEHIVE_ORG", None)
     appId = os.environ.get("APP_ID", "falcon2thehive")
+    
+    STREAM_TIMEOUT = int(os.environ.get("STREAM_TIMEOUT", "60"))
+    RETRY_SLEEP = int(os.environ.get("RETRY_SLEEP", "10"))
+
 
     if not CRWD_CLIENT_ID or not CRWD_CLIENT_SECRET:
         log.critical(
@@ -820,74 +839,73 @@ if __name__ == "__main__":
 
     url += "&offset=%s" % offset
 
-    try:
-        epoch_time = int(time.time())
-        headers = {"Authorization": "Token %s" % token, "Connection": "Keep-Alive"}
-        r = requests.get(url, headers=headers, stream=True)
-        # log.info("Streaming API Connection established. Thread: %s", id)
+    while running:
+        try:
+            epoch_time = int(time.time())
+            headers = {"Authorization": "Token %s" % token, "Connection": "Keep-Alive"}
+            r = requests.get(url, headers=headers, stream=True, timeout=STREAM_TIMEOUT)
+            # log.info("Streaming API Connection established. Thread: %s", id)
 
-        for line in r.iter_lines():
-            try:
-                if line:
-                    decoded_line = line.decode("utf-8")
-                    log.debug("Got a new message, decoding to JSON...")
-                    decoded_line = json.loads(decoded_line)
-                    log.debug("Decoded JSON: %s", decoded_line)
+            for line in r.iter_lines():
+                try:
+                    if line:
+                        decoded_line = line.decode("utf-8")
+                        log.debug("Got a new message, decoding to JSON...")
+                        decoded_line = json.loads(decoded_line)
+                        log.debug("Decoded JSON: %s", decoded_line)
 
-                    # Support all event types in a dispatcher
-                    meta = decoded_line.get("metadata", {})
-                    event_type = meta.get("eventType") or decoded_line.get("type")
+                        # Support all event types in a dispatcher
+                        meta = decoded_line.get("metadata", {})
+                        event_type = meta.get("eventType") or decoded_line.get("type")
 
-                    log.debug("event_type=%s", event_type)
-                    event_payload = decoded_line.get("event", decoded_line)
+                        log.debug("event_type=%s", event_type)
+                        event_payload = decoded_line.get("event", decoded_line)
 
-                    try:
-                        if event_type in (
-                            "DetectionSummaryEvent",
-                            "EppDetectionSummaryEvent",
-                        ):
-                            new_alert = create_alert_detection(event_payload)
-                            push_alert(new_alert, hive)
-                        elif event_type in (
-                            "IdentityProtectionEvent",
-                            "IdpDetectionSummaryEvent",
-                        ):
-                            new_alert = create_alert_identity(event_payload)
-                            push_alert(new_alert, hive)
-                        elif event_type in ("MobileDetectionSummaryEvent",):
-                            new_alert = create_alert_mobile(event_payload)
-                            push_alert(new_alert, hive)
-                        else:
-                            log.warning("Unsupported event_type: %s", event_type)
-                            continue
-                    except TheHiveError as e:
-                        log.error("TheHive error: %s", e)
-                        if e.response:
-                            log.error(
-                                "Response status code: %s", e.response.status_code
-                            )
-                            log.debug("Response content: %s", e.response.text)
-                    except Exception as e:
-                        log.exception("An unexpected error occurred: %s", e)
+                        try:
+                            if event_type in (
+                                "DetectionSummaryEvent",
+                                "EppDetectionSummaryEvent",
+                            ):
+                                new_alert = create_alert_detection(event_payload)
+                                push_alert(new_alert, hive)
+                            elif event_type in (
+                                "IdentityProtectionEvent",
+                                "IdpDetectionSummaryEvent",
+                            ):
+                                new_alert = create_alert_identity(event_payload)
+                                push_alert(new_alert, hive)
+                            elif event_type in ("MobileDetectionSummaryEvent",):
+                                new_alert = create_alert_mobile(event_payload)
+                                push_alert(new_alert, hive)
+                            else:
+                                log.warning("Unsupported event_type: %s", event_type)
+                                continue
+                        except TheHiveError as e:
+                            log.error("TheHive error: %s", e)
+                            if e.response:
+                                log.error(
+                                    "Response status code: %s", e.response.status_code
+                                )
+                                log.debug("Response content: %s", e.response.text)
+                        except Exception as e:
+                            log.exception("An unexpected error occurred: %s", e)
 
-                # Refreshing stream
-                if int(time.time()) > (900 + epoch_time):
-                    log.info("Event Window Expired, refreshing Token")
-                    if refresh_stream():
-                        log.info("Stream refresh succeeded")
-                        epoch_time = int(time.time())
+                    # Refreshing stream
+                    if int(time.time()) > (900 + epoch_time):
+                        log.info("Event Window Expired, refreshing Token")
+                        if refresh_stream():
+                            log.info("Stream refresh succeeded")
+                            epoch_time = int(time.time())
 
-            except Exception as e:
-                log.error("Error reading stream chunk")
-                log.exception(
-                    "request status code %s\n%s", r.status_code, traceback.format_exc()
-                )
+                except Exception as e:
+                    log.error("Error reading stream chunk")
+                    log.exception(
+                        "request status code %s\n%s", r.status_code, traceback.format_exc()
+                    )
 
-    except Exception as e:
-        log.error("Error reading last stream chunk")
-        log.exception(
-            "request status code %s\n%s", r.status_code, traceback.format_exc()
-        )
-        os._exit(1)
-
+        except Exception as e:
+            log.error("Stream failed: %s", e)
+            time.sleep(RETRY_SLEEP)  # Wait 10s by default before retrying
+    
+    log.info("falcon2thehive has exited main loop, shutting down..")
     sys.exit(0)
